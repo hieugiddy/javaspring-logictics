@@ -161,45 +161,7 @@ HTTP request
 
 ### Cấu trúc thư mục vật lý theo màn hình/use case
 
-Trong từng service, nhóm theo màn hình/workflow. Mỗi nhóm đi theo thứ tự **`controller -> service -> repository -> db`**; DTO đặt cùng nhóm, còn cấu hình/bảo mật/tích hợp dùng chung đặt ngoài `screens/`.
-
-```text
-inventory-service/src/main/java/com/logistics/inventory/
-├── InventoryServiceApplication.java
-├── common/
-│   ├── config/                    # Spring, DataSource, OpenAPI
-│   ├── security/                  # JWT/role mapping
-│   ├── error/                     # Exception -> HTTP response
-│   └── tracing/                   # Request/correlation ID
-├── screens/
-│   ├── S07-warehouse-zone/
-│   │   ├── controller/WarehouseController.java
-│   │   ├── service/CreateWarehouseService.java
-│   │   ├── service/ListWarehouseZonesService.java
-│   │   ├── repository/WarehouseRepository.java
-│   │   ├── db/jpa/WarehouseEntity.java
-│   │   └── dto/
-│   ├── S08-inventory-lookup/
-│   │   ├── controller/InventoryQueryController.java
-│   │   ├── service/GetInventoryService.java
-│   │   ├── repository/InventoryQueryRepository.java
-│   │   ├── db/mybatis/InventoryQueryMapper.java
-│   │   ├── db/mybatis/InventoryQueryMapper.xml
-│   │   └── dto/
-│   └── S08-inventory-adjust/
-│       ├── controller/InventoryAdjustmentController.java
-│       ├── service/AdjustInventoryService.java
-│       ├── repository/InventoryAdjustmentRepository.java
-│       ├── db/procedure/InventoryAdjustmentProcedure.java
-│       └── dto/AdjustInventoryRequest.java
-├── integration/
-│   ├── redis/                       # Cache adapter
-│   ├── rabbitmq/                   # Publisher/consumer/outbox adapter
-│   └── client/                     # REST client tới service khác
-└── resources/
-  ├── application.yml
-  ├── db/migration/               # Flyway migration của service này
-  └── mapper/                     # XML nếu đặt mapper tập trung
+Viết lại đoạn này cho đúng
 ```
 
 ### Màn hình được đặt trong service nào
