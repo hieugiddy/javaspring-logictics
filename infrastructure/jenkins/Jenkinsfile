@@ -1,0 +1,54 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_NAME = 'logistics-warehouse'
+        IMAGE_TAG = "${GIT_COMMIT}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps { checkout scm }
+        }
+
+        stage('Gradle Test') {
+            steps { sh './gradlew clean test --no-daemon' }
+        }
+
+        stage('Package WAR') {
+            steps { sh './gradlew bootWar --no-daemon' }
+        }
+
+        stage('Archive WAR') {
+            steps {
+                archiveArtifacts artifacts: 'build/libs/*.war', fingerprint: true
+            }
+        }
+
+        stage('Docker Build') {
+            when { expression { fileExists('Dockerfile') } }
+            steps {
+                sh 'docker build -t ${APP_NAME}:${IMAGE_TAG} .'
+            }
+        }
+
+        stage('Deploy DEV Tomcat') {
+            steps {
+                echo 'Deploy the versioned WAR artifact to DEV Tomcat.'
+            }
+        }
+
+        stage('Smoke Test') {
+            steps {
+                echo 'Run /actuator/health and critical API smoke tests.'
+            }
+        }
+    }
+
+    post {
+        always {
+            junit allowEmptyResults: true,
+                  testResults: '**/build/test-results/test/*.xml'
+        }
+    }
+}

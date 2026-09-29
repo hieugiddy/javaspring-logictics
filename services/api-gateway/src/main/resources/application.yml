@@ -1,0 +1,48 @@
+spring:
+  application:
+    name: api-gateway
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${JWT_ISSUER:http://localhost:8081}
+  cloud:
+    gateway:
+      server:
+        webmvc:
+          routes:
+            - id: auth-service
+              uri: ${AUTH_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/auth/**,/.well-known/jwks.json
+            - id: product-service
+              uri: ${PRODUCT_SERVICE_URL:http://localhost:8082}
+              predicates:
+                - Path=/api/products/**,/api/categories/**
+            - id: warehouse-service
+              uri: ${WAREHOUSE_SERVICE_URL:http://localhost:8083}
+              predicates:
+                - Path=/api/warehouses/**,/api/warehouse-zones/**
+            - id: inventory-service
+              uri: ${INVENTORY_SERVICE_URL:http://localhost:8084}
+              predicates:
+                - Path=/api/inventory/**
+            - id: order-service
+              uri: ${ORDER_SERVICE_URL:http://localhost:8085}
+              predicates:
+                - Path=/api/orders/**
+            - id: shipment-service
+              uri: ${SHIPMENT_SERVICE_URL:http://localhost:8086}
+              predicates:
+                - Path=/api/shipments/**
+            - id: notification-service
+              uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8087}
+              predicates:
+                - Path=/api/notifications/**
+server:
+  port: ${SERVER_PORT:8080}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway

@@ -1,0 +1,21 @@
+server:
+  servlet:
+    context-path: /product-service
+
+security:
+  jwt:
+    issuer: ${JWT_ISSUER:logistics-user-service}
+    audience: ${JWT_AUDIENCE:logistics-api}
+    secret: ${JWT_SECRET:CHANGE_ME}
+    access-token-ttl: ${JWT_ACCESS_TOKEN_TTL:15m}
+    refresh-token-ttl: ${JWT_REFRESH_TOKEN_TTL:7d}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

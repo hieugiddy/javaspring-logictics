@@ -1,0 +1,9 @@
+CREATE USER wms WITH PASSWORD 'wms';
+ALTER USER wms CREATEDB;
+CREATE DATABASE auth_db OWNER wms;
+CREATE DATABASE product_db OWNER wms;
+CREATE DATABASE warehouse_db OWNER wms;
+CREATE DATABASE inventory_db OWNER wms;
+CREATE DATABASE order_db OWNER wms;
+CREATE DATABASE shipment_db OWNER wms;
+CREATE DATABASE notification_db OWNER wms;

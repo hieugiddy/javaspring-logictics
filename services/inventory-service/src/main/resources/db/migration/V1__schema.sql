@@ -1,0 +1,3 @@
+CREATE TABLE inventory (product_id BIGINT NOT NULL,warehouse_id BIGINT NOT NULL,quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity>=0),reserved_quantity INTEGER NOT NULL DEFAULT 0 CHECK(reserved_quantity>=0),version BIGINT NOT NULL DEFAULT 0,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),PRIMARY KEY(product_id,warehouse_id));
+CREATE TABLE inventory_transactions (id BIGSERIAL PRIMARY KEY,product_id BIGINT NOT NULL,warehouse_id BIGINT NOT NULL,order_id UUID,transaction_type VARCHAR(30) NOT NULL,quantity INTEGER NOT NULL,reference_no VARCHAR(100),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE INDEX idx_inventory_tx_product_warehouse_created ON inventory_transactions(product_id,warehouse_id,created_at DESC);
