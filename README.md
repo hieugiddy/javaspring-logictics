@@ -161,10 +161,7 @@ HTTP request
 
 ### Cấu trúc thư mục vật lý theo màn hình/use case
 
-Viết lại đoạn này cho đúng
-```
-
-### Màn hình được đặt trong service nào
+#### Màn hình được đặt trong service nào
 
 | Service                   | Thư mục màn hình/use case                                                                                                            |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -178,7 +175,7 @@ Viết lại đoạn này cho đúng
 
 Quy tắc phụ thuộc trong mỗi màn hình: controller gọi service; service gọi repository interface; adapter trong `db/` cài repository bằng JPA, MyBatis hoặc procedure. Controller không gọi DB trực tiếp. Đặt `@Transactional` trong service/use case sở hữu transaction. S03 Dashboard chỉ tổng hợp dữ liệu đọc từ Inventory/Order API; không query DB của hai service.
 
-### Filter và xử lý request
+#### Filter và xử lý request
 
 ```mermaid
 sequenceDiagram
