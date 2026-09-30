@@ -118,7 +118,7 @@ Ví dụ chạy Gateway khi service ở Docker network:
 ```bash
 export AUTH_SERVICE_URL=http://auth-service:8081
 export PRODUCT_SERVICE_URL=http://product-service:8082
-mvn spring-boot:run
+./gradlew bootRun
 ```
 
 ## 8. Cách cấu hình route và security

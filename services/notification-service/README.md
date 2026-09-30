@@ -6,11 +6,11 @@ Notification Service sở hữu bảng `notifications` và là nơi nhận các 
 
 ```mermaid
 flowchart LR
- E[(Kafka)] --> C[NotificationConsumer]
- C --> S[NotificationApplicationService]
- S --> R[NotificationRepository]
- R --> DB[(notification_db\nnotifications)]
- API[NotificationController] --> S
+  E[(RabbitMQ)] --> C[NotificationConsumer]
+  C --> S[NotificationApplicationService]
+  S --> R[NotificationRepository]
+  R --> DB[(notification_db\nnotifications)]
+  API[NotificationController] --> S
 ```
 
 ## 2. Thư viện
@@ -23,7 +23,7 @@ flowchart LR
 - PostgreSQL
 - Flyway
 - Actuator
-- `spring-boot-starter-kafka`
+- `spring-boot-starter-amqp` (RabbitMQ)
 - Spring Boot Test
 
 ## 3. Source hiện tại
@@ -40,7 +40,7 @@ notification-service/
         └── db/migration/V1__schema.sql
 ```
 
-Kafka dependency đã có trong POM, nhưng consumer/controller nghiệp vụ chưa được implement trong source hiện tại.
+RabbitMQ dependency đã có trong build.gradle, nhưng consumer/controller nghiệp vụ chưa được implement trong source hiện tại.
 
 Cấu trúc mục tiêu:
 
@@ -76,7 +76,7 @@ Order/Inventory/Shipment
         |
         | domain event
         v
-      Kafka
+      RabbitMQ
         |
         v
 NotificationEventConsumer
@@ -107,12 +107,12 @@ Ví dụ Shipment Service phát event:
 Consumer xử lý:
 
 ```text
-Kafka message
- -> deserialize event
- -> kiểm tra eventId đã xử lý chưa
- -> tạo notification
- -> commit DB
- -> ACK/commit Kafka offset
+RabbitMQ message
+  -> deserialize event
+  -> kiểm tra eventId đã xử lý chưa
+  -> tạo notification
+  -> commit DB
+  -> ACK message
 ```
 
 Nếu ghi DB thất bại, không ACK để message có thể retry theo policy. Production nên có retry/DLQ.
@@ -138,10 +138,10 @@ public record ShipmentStatusChangedEvent(
 ### Consumer và application service
 
 ```java
-@KafkaListener(topics = "${app.kafka.topics.shipment-events}")
-public void consume(ShipmentStatusChangedEvent event, Acknowledgment acknowledgment) {
+@RabbitListener(queues = "${app.rabbitmq.queues.shipment-events}")
+public void consume(ShipmentStatusChangedEvent event, Channel channel, @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag) {
         notificationService.createIfAbsent(event); // transaction commit xong mới return
-        acknowledgment.acknowledge();
+        channel.basicAck(deliveryTag, false);
 }
 ```
 

@@ -6,12 +6,12 @@ Quản lý vận chuyển và tracking dựa trên bảng `shipments`.
 
 ```mermaid
 flowchart LR
- C[Client] --> G[Gateway :8080]
- G --> SC[ShipmentController]
- SC --> SS[ShipmentApplicationService]
- SS --> SR[ShipmentRepository]
- SR --> DB[(shipment_db\nshipments)]
- SS -. future event .-> K[(Kafka)]
+  C[Client] --> G[Gateway :8080]
+  G --> SC[ShipmentController]
+  SC --> SS[ShipmentApplicationService]
+  SS --> SR[ShipmentRepository]
+  SR --> DB[(shipment_db\nshipments)]
+  SS -. future event .-> K[(RabbitMQ)]
 ```
 
 ## 2. Thư viện

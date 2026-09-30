@@ -17,7 +17,7 @@ flowchart LR
     O[Order Service\n:8085\norder_db]
     S[Shipment Service\n:8086\nshipment_db]
     N[Notification Service\n:8087\nnotification_db]
-    K[(Event Broker\nKafka - planned)]
+    K[(Event Broker\nRabbitMQ)]
 
     C -->|HTTP/JSON| G
     G -->|/api/auth/**| A
@@ -55,20 +55,23 @@ Các bảng và quan hệ được phân service theo schema gốc: users/refres
 
 ## 2. Công nghệ và thư viện
 
-- Java 21
-- Spring Boot 4.1.1
-- Spring Cloud 2025.1.3 — chỉ dùng cho Gateway
+- Java 17
+- Spring Boot 3.x
+- Spring Cloud Gateway (Spring Cloud 2023.x tương thích Spring Boot 3)
 - Spring MVC / WebMVC
 - Spring Security
 - OAuth2 Resource Server + JOSE/JWT
 - Spring Data JPA + Hibernate
-- PostgreSQL 17
+- MyBatis (cho query phức tạp, search, báo cáo)
+- PostgreSQL 15+
 - Flyway + Flyway PostgreSQL
 - Bean Validation
 - Actuator
-- JUnit/Spring Boot Test
-- Kafka: đã thêm dependency ở `notification-service`; luồng event production/consumer là bước tiếp theo
-- Maven
+- JUnit 5 / Spring Boot Test / Testcontainers
+- RabbitMQ (event broker)
+- Redis (cache/coordination)
+- Gradle Wrapper
+- WAR package, External Tomcat 10.1 (Servlet 6.0)
 
 ## 3. Quy tắc kiến trúc khi code
 
@@ -81,7 +84,7 @@ HTTP request
   -> Application/Service use case
   -> Domain/business rule
   -> Repository
-  -> JPA Entity
+  -> JPA Entity / MyBatis Mapper
   -> PostgreSQL
   -> Response DTO
   -> HTTP response
@@ -102,7 +105,7 @@ Khi cần bất đồng bộ:
 ```text
 Business transaction
   -> event/outbox
-  -> Kafka
+  -> RabbitMQ
   -> Notification consumer
   -> notification_db
 ```
@@ -132,13 +135,18 @@ src/main/java
     dto                 <- API contract
     service             <- use case/business orchestration
     repository         <- persistence contract
-    entity              <- database model
+    entity              <- database model (JPA)
+    mapper              <- MyBatis mapper interface (nếu có)
     client              <- outbound service call (khi cần)
-    event              <- Kafka/event model (khi cần)
+    event              <- RabbitMQ/event model (khi cần)
 
 src/main/resources
     application.yml
     db/migration/*.sql
+    mybatis/mapper/*.xml  <- MyBatis XML mapper (nếu có)
+
+src/main/webapp
+    WEB-INF/web.xml       <- optional cho Tomcat deployment
 ```
 
 `auth-service` hiện đang dùng package đơn giản (`controller`, `service`, `repository`, ...). Khi mở rộng các service nghiệp vụ, có thể giữ cách này hoặc chuyển sang package theo feature; README của từng service mô tả cấu trúc đề xuất.
@@ -240,44 +248,55 @@ Refresh token được rotate: token cũ bị revoke và token mới được l�
 
 ## 7. Chạy hệ thống
 
-### Bước 1 — PostgreSQL
+### Bước 1 — PostgreSQL, Redis, RabbitMQ
 
 ```bash
-docker compose up -d postgres
+docker compose -f infrastructure/docker-compose.yml up -d postgres redis rabbitmq
 ```
 
-### Bước 2 — Auth
+### Bước 2 — Build WAR với Gradle Wrapper
+
+Mỗi service là một dự án Gradle độc lập. Build artifact WAR:
 
 ```bash
-cd auth-service
-mvn spring-boot:run
+cd services/auth-service
+../gradlew clean test bootWar
 ```
 
-### Bước 3 — Các service khác
+Artifact: `build/libs/auth-service.war`
 
-Mỗi service chạy ở terminal riêng:
+### Bước 3 — Deploy lên External Tomcat 10.1
+
+Copy WAR vào `<TOMCAT_HOME>/webapps/`:
 
 ```bash
-cd product-service && mvn spring-boot:run
-cd warehouse-service && mvn spring-boot:run
-cd inventory-service && mvn spring-boot:run
-cd order-service && mvn spring-boot:run
-cd shipment-service && mvn spring-boot:run
-cd notification-service && mvn spring-boot:run
+copy services\auth-service\build\libs\auth-service.war %TOMCAT_HOME%\webapps\
 ```
 
-### Bước 4 — Gateway
+Khởi động Tomcat:
 
 ```bash
-cd api-gateway
-mvn spring-boot:run
+%TOMCAT_HOME%\bin\startup.bat
 ```
 
-Health:
+### Bước 4 — Chạy các service khác
+
+Lặp lại Bước 2-3 cho từng service:
+- `product-service` (port 8082)
+- `warehouse-service` (port 8083)
+- `inventory-service` (port 8084)
+- `order-service` (port 8085)
+- `shipment-service` (port 8086)
+- `notification-service` (port 8087)
+- `api-gateway` (port 8080)
+
+### Health check
 
 ```text
 GET http://localhost:8080/actuator/health
 ```
+
+> **Lưu ý:** Trong môi trường dev có thể chạy `../gradlew bootRun` để test nhanh, nhưng artifact triển khai chính thức là WAR trên Tomcat 10.1.
 
 ## 8. Thứ tự code một feature mới
 
@@ -346,21 +365,30 @@ Trong `ProductApplicationService.create`, chuẩn hóa SKU -> kiểm tra trùng 
 - [`inventory-service/README.md`](inventory-service/README.md) — stock/transaction và concurrency.
 - [`order-service/README.md`](order-service/README.md) — order/order item và gọi inventory.
 - [`shipment-service/README.md`](shipment-service/README.md) — shipment/tracking.
-- [`notification-service/README.md`](notification-service/README.md) — notification + Kafka consumer.
+- [`notification-service/README.md`](notification-service/README.md) — notification + RabbitMQ consumer.
 
 ## 10. Trạng thái source hiện tại
 
-| Project      | Bootstrap | Security | Migration | Business API             |
-| ------------ | --------- | -------- | --------- | ------------------------ |
-| Gateway      | Có       | Có      | N/A       | Route config             |
-| Auth         | Có       | Có      | Có       | **Đã implement** |
-| Product      | Có       | Có      | Có       | Chưa implement          |
-| Warehouse    | Có       | Có      | Có       | Chưa implement          |
-| Inventory    | Có       | Có      | Có       | Chưa implement          |
-| Order        | Có       | Có      | Có       | Chưa implement          |
-| Shipment     | Có       | Có      | Có       | Chưa implement          |
-| Notification | Có       | Có      | Có       | Chưa implement          |
+| Project      | Bootstrap | Security | Migration | Business API             | Build Tool |
+| ------------ | --------- | -------- | --------- | ------------------------ | ---------- |
+| Gateway      | Có       | Có      | N/A       | Route config             | Gradle     |
+| Auth         | Có       | Có      | Có       | **Đã implement**         | Gradle     |
+| Product      | Có       | Có      | Có       | Chưa implement           | Gradle     |
+| Warehouse    | Có       | Có      | Có       | Chưa implement           | Gradle     |
+| Inventory    | Có       | Có      | Có       | Chưa implement           | Gradle     |
+| Order        | Có       | Có      | Có       | Chưa implement           | Gradle     |
+| Shipment     | Có       | Có      | Có       | Chưa implement           | Gradle     |
+| Notification | Có       | Có      | Có       | Chưa implement           | Gradle     |
 
 ## 11. Lưu ý môi trường
 
-Trong runtime tạo bundle này không có Maven executable, nên source **chưa được build/run thực tế trong môi trường tạo file**. Java 21 có sẵn. Khi máy phát triển có Maven, chạy `mvn clean verify` trong từng project trước khi triển khai.
+Workspace hiện là scaffold tài liệu: thư mục service chưa có controller/entity. Các API, quy trình build và deployment trong tài liệu là hợp đồng mục tiêu để triển khai.
+
+Baseline: JDK 17, Gradle Wrapper, PostgreSQL, Redis, RabbitMQ, Docker và Tomcat 10.1 tương thích.
+
+```bash
+docker compose -f infrastructure/docker-compose.yml up -d postgres redis rabbitmq
+./gradlew clean test bootWar
+```
+
+Artifact mục tiêu: `build/libs/<service>.war`; triển khai vào `<TOMCAT_HOME>/webapps/`.
