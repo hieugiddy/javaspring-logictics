@@ -219,6 +219,362 @@ POST /api/v1/inventory/adjust
 
 Mẫu này không dùng DynamicRoutingDataSource theo hotel/chain. Mỗi service nhận cấu hình DataSource tĩnh theo môi trường; nếu sau này cần multi-tenancy thì phải thiết kế tenant claim, isolation và routing riêng trước khi thêm ThreadLocal routing.
 
+## 3.5. Xác thực & Phân quyền (Authentication & Authorization)
+
+### 3.5.1. Kiến trúc xác thực (Authentication Architecture)
+
+```
+┌─────────────┐     1. Login/Register      ┌──────────────────┐
+│   Client    │ ─────────────────────────> │  Auth Service    │
+│             │ <───────────────────────── │  (Port 8081)     │
+└─────────────┘     2. Access Token +      └────────┬─────────┘
+       │              Refresh Token               │
+       │                                          │
+       │ 3. Request + Bearer Token                │
+       ▼                                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    API Gateway (Port 8080)                  │
+│  - Validate JWT signature, exp, iss, aud                   │
+│  - Extract claims (userId, username, role, scope)          │
+│  - Set X-User-Id, X-Role, X-Username headers               │
+│  - Route to target service                                  │
+└─────────────────────────────────────────────────────────────┘
+       │                                          │
+       ▼                                          ▼
+┌──────────────────┐                   ┌──────────────────┐
+│ Product Service  │                   │ Inventory Service│
+│ (Port 8082)      │                   │ (Port 8084)      │
+│ - Validate JWT   │                   │ - Validate JWT   │
+│ - Check role     │                   │ - Check role     │
+│ - Check ownership│                   │ - Check ownership│
+└──────────────────┘                   └──────────────────┘
+```
+
+### 3.5.2. Luồng xác thực chi tiết (Authentication Flow)
+
+#### Bước 1: Đăng ký/Đăng nhập (Register/Login)
+```http
+POST /api/v1/auth/register
+POST /api/v1/auth/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "ChangeMe123!",
+  "email": "admin@example.com"
+}
+```
+
+**Xử lý tại Auth Service:**
+1. `AuthController` nhận request → validate DTO
+2. `AuthCommandService.login()`:
+   - Tìm user bằng `UserRepository.findByUsername()`
+   - `PasswordEncoder.matches(rawPassword, storedHash)` (BCrypt cost 12)
+   - Kiểm tra `user.status == ACTIVE`
+   - Gọi `TokenService.issueTokens(user)` → tạo Access Token (RS256, 15min) + Refresh Token (opaque, 7 ngày)
+   - Lưu Refresh Token hash (SHA-256) vào `refresh_tokens` table
+3. Trả về `AuthResponse`: `{accessToken, refreshToken, expiresIn, tokenType}`
+
+#### Bước 2: Gọi API được bảo vệ
+```http
+GET /api/v1/products
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**Xử lý tại API Gateway:**
+1. `SecurityFilterChain` extract Bearer token từ header
+2. `JwtDecoder` validate:
+   - Chữ ký RS256 (public key từ JWKS)
+   - `exp` (hết hạn), `nbf` (chưa hiệu lực), `iss` (issuer), `aud` (audience)
+3. Tạo `Authentication` với claims → set vào `SecurityContext`
+4. Thêm headers: `X-User-Id`, `X-Username`, `X-Role`, `X-Scopes`
+5. Route request tới service đích
+
+#### Bước 3: Service đích xác thực lại (Defense in Depth)
+```java
+// SecurityConfig của mỗi service
+@Bean
+SecurityFilterChain filterChain(HttpSecurity http) {
+    return http
+        .csrf(csrf -> csrf.disable())
+        .sessionManagement(sm -> sm.sessionCreationPolicy(STATELESS))
+        .authorizeHttpRequests(auth -> auth
+            .requestMatchers("/api/auth/**", "/actuator/health").permitAll()
+            .anyRequest().authenticated())
+        .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))
+        .build();
+}
+```
+
+Service **KHÔNG tin cậy** Gateway validation; tự validate JWT để đảm bảo bảo mật nếu bypass Gateway.
+
+### 3.5.3. Phân quyền (Authorization - RBAC + Resource Ownership)
+
+#### Role Hierarchy
+```
+SUPER_ADMIN > ADMIN > WAREHOUSE_MANAGER > STAFF > VIEWER
+```
+
+#### Cấu hình Method Security
+```java
+// Mỗi service: config/MethodSecurityConfig.java
+@EnableMethodSecurity(prePostEnabled = true, securedEnabled = true)
+public class MethodSecurityConfig {}
+```
+
+#### Sử dụng @PreAuthorize trên Service Impl (Use Case Boundary)
+```java
+// ProductCommandServiceImpl.java
+@Service @RequiredArgsConstructor
+public class ProductCommandServiceImpl implements ProductCommandService {
+    
+    @PreAuthorize("hasRole('ADMIN') or hasRole('SUPER_ADMIN')")
+    @Transactional
+    public ProductResponse create(CreateProductRequest request) { ... }
+    
+    @PreAuthorize("hasRole('WAREHOUSE_MANAGER') and @authorizationService.canAccessWarehouse(#warehouseId)")
+    @Transactional
+    public InventoryResponse adjust(AdjustInventoryRequest request) { ... }
+}
+```
+
+#### Custom AuthorizationService (common/security/)
+```java
+// common/security/AuthorizationService.java
+@Service @RequiredArgsConstructor
+public class AuthorizationService {
+    private final UserWarehouseRepository userWarehouseRepo;
+    
+    public void requireRole(Role... allowed) {
+        Role current = CurrentUser.get().role();
+        if (!Arrays.asList(allowed).contains(current)) {
+            throw new AccessDeniedException("Insufficient role");
+        }
+    }
+    
+    public boolean canAccessWarehouse(Long warehouseId) {
+        UserPrincipal principal = CurrentUser.get();
+        if (principal.role() == Role.ADMIN || principal.role() == Role.SUPER_ADMIN) {
+            return true;
+        }
+        return userWarehouseRepo.existsByUserIdAndWarehouseId(principal.userId(), warehouseId);
+    }
+}
+```
+
+#### CurrentUser Helper (Extract Principal từ JWT)
+```java
+// common/security/CurrentUser.java
+@Component
+public class CurrentUser {
+    public static UserPrincipal get() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        return (UserPrincipal) auth.getPrincipal();
+    }
+}
+
+// common/security/UserPrincipal.java (implements UserDetails)
+public record UserPrincipal(
+    Long userId, 
+    String username, 
+    String email, 
+    Role role, 
+    Set<String> scopes
+) implements UserDetails { ... }
+```
+
+#### JWT → UserPrincipal Mapping (JwtAuthenticationConverter)
+```java
+// config/JwtAuthenticationConverter.java
+@Component
+public class JwtAuthenticationConverter implements Converter<Jwt, AbstractAuthenticationToken> {
+    @Override
+    public AbstractAuthenticationToken convert(Jwt jwt) {
+        Collection<GrantedAuthority> authorities = Stream.of(jwt.getClaimAsString("role").split(","))
+            .map(r -> new SimpleGrantedAuthority("ROLE_" + r.trim()))
+            .collect(Collectors.toList());
+        
+        UserPrincipal principal = new UserPrincipal(
+            Long.valueOf(jwt.getSubject()),
+            jwt.getClaimAsString("username"),
+            jwt.getClaimAsString("email"),
+            Role.valueOf(jwt.getClaimAsString("role")),
+            Set.of(jwt.getClaimAsString("scope").split(" "))
+        );
+        
+        return new JwtAuthenticationToken(jwt, authorities, principal);
+    }
+}
+```
+
+### 3.5.4. Refresh Token Rotation (Opaque Token)
+
+```java
+// screens/S02-session/service/impl/RefreshTokenServiceImpl.java
+@Service @RequiredArgsConstructor
+public class RefreshTokenServiceImpl implements RefreshTokenService {
+    
+    @Transactional
+    public TokenPair refresh(String refreshToken) {
+        String hash = sha256(refreshToken);
+        RefreshTokenEntity stored = repo.findByTokenHash(hash)
+            .orElseThrow(() -> new InvalidTokenException("Invalid refresh token"));
+        
+        // Reuse detection: nếu token cũ đã bị revoke -> revoke toàn family
+        if (stored.getRevokedAt() != null) {
+            revokeFamily(stored.getJti());
+            throw new InvalidTokenException("Token reused, session revoked");
+        }
+        
+        // Rotation: revoke old, create new
+        stored.setRevokedAt(Instant.now());
+        String newJti = UUID.randomUUID().toString();
+        stored.setReplacedByJti(newJti);
+        
+        RefreshTokenEntity newToken = new RefreshTokenEntity();
+        newToken.setTokenHash(sha256(newRefreshToken));
+        newToken.setUserId(stored.getUserId());
+        newToken.setJti(newJti);
+        newToken.setExpiresAt(Instant.now().plusDays(7));
+        repo.save(newToken);
+        
+        return new TokenPair(createAccessToken(user), newRefreshToken);
+    }
+}
+```
+
+**Đặc điểm:**
+- Refresh token = opaque random (32 bytes), chỉ lưu **SHA-256 hash** trong DB
+- Rotation: token cũ revoke, token mới issued, link qua `replaced_by_jti`
+- Reuse detection: phát hiện token bị dùng lại -> revoke toàn bộ family (cascade)
+
+### 3.5.5. Giao tiếp giữa các Service (Service-to-Service Communication)
+
+#### Pattern: HTTP Client (WebClient) với Circuit Breaker
+```java
+// client/InventoryClient.java (Port Interface)
+public interface InventoryClient {
+    ReserveResponse reserve(ReserveRequest request);
+    ReleaseResponse release(ReleaseRequest request);
+}
+
+// client/WebClientInventoryClient.java (Adapter Implementation)
+@Component @RequiredArgsConstructor
+public class WebClientInventoryClient implements InventoryClient {
+    private final WebClient webClient;
+    
+    public ReserveResponse reserve(ReserveRequest req) {
+        return webClient.post()
+            .uri("/api/v1/inventory/reserve")
+            .header("Idempotency-Key", req.idempotencyKey())
+            .header("X-User-Id", CurrentUser.get().userId().toString()) // forward identity
+            .bodyValue(req)
+            .retrieve()
+            .onStatus(HttpStatus::is4xxClientError, 
+                r -> r.bodyToMono(String.class).map(InventoryServiceException::new))
+            .onStatus(HttpStatus::is5xxServerError,
+                r -> r.bodyToMono(String.class).map(InventoryServiceException::new))
+            .bodyToMono(ReserveResponse.class)
+            .block(); // hoặc reactive
+    }
+}
+```
+
+#### Circuit Breaker & Retry (Resilience4j)
+```yaml
+# application.yml
+resilience4j:
+  circuitbreaker:
+    instances:
+      inventoryService:
+        registerHealthIndicator: true
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        failureRateThreshold: 50
+        waitDurationInOpenState: 30s
+  retry:
+    instances:
+      inventoryService:
+        maxAttempts: 3
+        waitDuration: 500ms
+        enableExponentialBackoff: true
+        exponentialBackoffMultiplier: 2
+```
+
+```java
+// Sử dụng trong WebClientInventoryClient
+@CircuitBreaker(name = "inventoryService", fallbackMethod = "reserveFallback")
+@Retry(name = "inventoryService")
+public ReserveResponse reserve(ReserveRequest req) { ... }
+
+private ReserveResponse reserveFallback(ReserveRequest req, Exception ex) {
+    return ReserveResponse.failed("Inventory service unavailable: " + ex.getMessage());
+}
+```
+
+#### Idempotency Key cho Cross-Service Calls
+```java
+// Header bắt buộc khi gọi service khác
+HttpHeaders headers = new HttpHeaders();
+headers.set("Idempotency-Key", UUID.randomUUID().toString()); // hoặc từ request gốc
+headers.set("X-User-Id", CurrentUser.get().userId().toString());
+headers.set("X-Role", CurrentUser.get().role().name());
+headers.set("X-Correlation-ID", MDC.get("traceId"));
+```
+
+### 3.5.6. Cấu trúc Code Xác thực/Phân quyền (Code Structure)
+
+```
+services/auth-service/src/main/java/com/wms/auth/
+├── screens/
+│   ├── S01-login/
+│   │   ├── controller/AuthController.java
+│   │   ├── dto/LoginRequest.java, RegisterRequest.java, AuthResponse.java
+│   │   ├── service/
+│   │   │   ├── AuthCommandService.java (Port)
+│   │   │   └── impl/AuthCommandServiceImpl.java
+│   │   ├── repository/UserRepository.java (Port)
+│   │   └── db/jpa/UserEntity.java
+│   ├── S02-session/
+│   │   ├── service/
+│   │   │   ├── TokenService.java (Port) - issue access/refresh
+│   │   │   ├── RefreshTokenService.java (Port) - rotation
+│   │   │   └── impl/TokenServiceImpl.java, RefreshTokenServiceImpl.java
+│   │   ├── repository/RefreshTokenRepository.java (Port)
+│   │   └── db/jpa/RefreshTokenEntity.java
+│   └── S04-user-admin/
+├── config/
+│   ├── SecurityConfig.java (Resource Server)
+│   ├── RsaKeyConfig.java (Load RSA keys)
+│   ├── JwtDecoderConfig.java (Validate iss, aud, exp)
+│   ├── JwtAuthenticationConverter.java (JWT -> UserPrincipal)
+│   └── MethodSecurityConfig.java (@EnableMethodSecurity)
+├── common/security/
+│   ├── CurrentUser.java (ThreadLocal helper)
+│   ├── UserPrincipal.java (implements UserDetails)
+│   └── AuthorizationService.java (Role + Ownership checks)
+├── controller/JwkController.java (/.well-known/jwks.json)
+└── exception/
+    ├── InvalidTokenException.java
+    └── AccessDeniedException.java
+```
+
+**Mỗi service khác** có `common/security/` tương tự để extract principal và check authorization.
+
+### 3.5.7. Security Best Practices
+
+| Practice | Implementation |
+|----------|----------------|
+| **HTTPS Only** | `server.ssl.enabled=true`, Gateway terminate SSL |
+| **JWT Short Expiry** | Access token 15min, Refresh token 7 days |
+| **RS256 Asymmetric** | Private key sign (Auth Service), Public key verify (Gateway + Services) |
+| **JWKS Endpoint** | `GET /.well-known/jwks.json` cho key rotation |
+| **Refresh Rotation** | Single-use, revoke on reuse, family cascade revoke |
+| **BCrypt Cost 12** | Password hashing, timing attack prevention |
+| **No Secrets in Code** | Keys từ file/env, production dùng Vault/KMS |
+| **Audit Log** | Log login, logout, failed attempts với correlation ID |
+| **Rate Limit Auth** | `/api/auth/login` max 5 req/min/IP |
+
 ### Luồng giao tiếp
 
 1. Client gửi request qua Gateway; request được định tuyến tới đúng service theo route.

@@ -6,15 +6,15 @@ API Gateway là entry point của client. Gateway không sở hữu business dat
 
 ```mermaid
 flowchart LR
- C[Client] --> G[Gateway :8080]
- G --> A[auth :8081]
- G --> P[product :8082]
- G --> W[warehouse :8083]
- G --> I[inventory :8084]
- G --> O[order :8085]
- G --> S[shipment :8086]
- G --> N[notification :8087]
- A -. issuer/JWKS .-> G
+  C[Client] --> G[Gateway :8080]
+  G --> A[auth :8081]
+  G --> P[product :8082]
+  G --> W[warehouse :8083]
+  G --> I[inventory :8084]
+  G --> O[order :8085]
+  G --> S[shipment :8086]
+  G --> N[notification :8087]
+  A -. issuer/JWKS .-> G
 ```
 
 ## 2. Thư viện
@@ -29,7 +29,7 @@ flowchart LR
 
 ```text
 api-gateway/
-├── pom.xml
+├── build.gradle
 ├── README.md
 └── src/main
     ├── java/com/wms/gateway
@@ -39,12 +39,13 @@ api-gateway/
         └── application.yml
 ```
 
-Khi mở rộng:
+Khi mở rộng (Port/Adapter pattern cho Gateway):
 
 ```text
 com.wms.gateway
 ├── config/          # route, security, CORS
 ├── filter/          # correlation-id, logging, rate limit
+├── handler/         # fallback, error handling
 └── GatewayApplication.java
 ```
 
@@ -82,13 +83,13 @@ Authorization: Bearer <JWT>
 
 ```text
 Client
- -> Gateway :8080
- -> JWT validation
- -> route /api/products/**
- -> Product Service :8082
- -> response
- -> Gateway
- -> Client
+  -> Gateway :8080
+  -> JWT validation
+  -> route /api/products/**
+  -> Product Service :8082
+  -> response
+  -> Gateway
+  -> Client
 ```
 
 Health:
@@ -99,7 +100,7 @@ GET http://localhost:8080/actuator/health
 
 ## 7. Cấu hình
 
-`application.yml` dùng các biến:
+`application.yml` dùng các biến môi trường:
 
 ```text
 JWT_ISSUER
@@ -154,8 +155,8 @@ SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
                                                         "/api/auth/refresh",
                                                         "/.well-known/jwks.json",
                                                         "/actuator/health"
-                                        ).permitAll()
-                                        .anyRequest().authenticated())
+                                                ).permitAll()
+                                                .anyRequest().authenticated())
                         .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> {}))
                         .build();
 }

@@ -6,24 +6,24 @@ Quản lý `orders` và `order_items`. Order Service là nơi điều phối tr�
 
 ```mermaid
 flowchart LR
- C[Client] --> G[Gateway :8080]
- G --> OC[OrderController]
- OC --> OS[OrderApplicationService]
- OS --> OR[OrderRepository]
- OR --> DB[(order_db\norders\norder_items)]
- OS --> IC[InventoryClient]
- IC --> I[Inventory Service :8084]
+  C[Client] --> G[Gateway :8080]
+  G --> OC[OrderController]
+  OC --> OS[OrderCommandService / OrderQueryService]
+  OS --> OR[OrderRepository (JPA Port)]
+  OR --> DB[(order_db\norders\norder_items)]
+  OS --> IC[InventoryClient (WebClient Port)]
+  IC --> I[Inventory Service :8084]
 ```
 
 ## 2. Thư viện
 
-WebMVC, Validation, Security, OAuth2 Resource Server/JOSE, JPA, PostgreSQL, Flyway, Actuator, Test.
+WebMVC, Validation, Security, OAuth2 Resource Server/JOSE, JPA/Hibernate, PostgreSQL, Flyway, Actuator, Test, WebClient.
 
 ## 3. Source hiện tại
 
 ```text
 order-service/
-├── pom.xml
+├── build.gradle
 └── src/main
     ├── java/com/wms/order
     │   ├── OrderApplication.java
@@ -33,31 +33,83 @@ order-service/
         └── db/migration/V1__schema.sql
 ```
 
-Cấu trúc mục tiêu:
+Cấu trúc mục tiêu (Port/Adapter theo màn hình):
 
 ```text
 com.wms.order
-├── controller/
-├── dto/
-├── service/
-│   ├── OrderApplicationService.java
-│   └── OrderStateService.java
-├── repository/
-├── entity/
+├── config/
+│   ├── SecurityConfig.java
+│   └── JpaAuditingConfig.java
+├── screens/
+│   ├── S09-order-create/
+│   │   ├── controller/
+│   │   │   └── OrderCreateController.java
+│   │   ├── dto/
+│   │   │   ├── CreateOrderRequest.java
+│   │   │   ├── OrderItemRequest.java
+│   │   │   └── OrderResponse.java
+│   │   ├── service/
+│   │   │   ├── OrderCommandService.java (Port)
+│   │   │   └── impl/OrderCommandServiceImpl.java
+│   │   ├── repository/
+│   │   │   ├── OrderRepository.java (JPA Port)
+│   │   │   └── OrderItemRepository.java (JPA Port)
+│   │   └── db/
+│   │       └── jpa/
+│   │           ├── OrderEntity.java
+│   │           └── OrderItemEntity.java
+│   ├── S09-order-confirm/
+│   │   ├── controller/
+│   │   ├── dto/
+│   │   ├── service/
+│   │   │   ├── OrderConfirmService.java (Port)
+│   │   │   └── impl/OrderConfirmServiceImpl.java
+│   │   └── repository/
+│   │       └── OrderRepository.java (Port)
+│   ├── S09-order-cancel/
+│   │   ├── controller/
+│   │   ├── dto/
+│   │   ├── service/
+│   │   │   ├── OrderCancelService.java (Port)
+│   │   │   └── impl/OrderCancelServiceImpl.java
+│   │   └── repository/
+│   ├── S09-order-list/
+│   │   ├── controller/
+│   │   ├── dto/
+│   │   ├── service/
+│   │   │   ├── OrderQueryService.java (Port)
+│   │   │   └── impl/OrderQueryServiceImpl.java
+│   │   ├── repository/
+│   │   │   └── OrderRepository.java (Port)
+│   │   └── db/mybatis/
+│   │       └── OrderMapper.xml
 ├── client/
-│   └── InventoryClient.java
-├── exception/
+│   ├── InventoryClient.java (WebClient Port)
+│   └── ProductClient.java (WebClient Port)
+├── event/
+│   ├── OutboxEvent.java
+│   └── OutboxPublisher.java (TransactionalEventListener)
+├── common/
+│   ├── exception/
+│   │   ├── ApiException.java
+│   │   ├── BusinessRuleException.java
+│   │   ├── EntityNotFoundException.java
+│   │   └── GlobalExceptionHandler.java
+│   ├── filter/
+│   │   └── CorrelationIdFilter.java
+│   └── security/
+│       └── AuthorizationService.java
 └── config/
 ```
 
 ## 4. API mục tiêu
 
 ```text
-POST /api/orders
-GET  /api/orders/{id}
-GET  /api/orders
-POST /api/orders/{id}/confirm
-POST /api/orders/{id}/cancel
+POST   /api/v1/orders
+GET    /api/v1/orders/{id}
+GET    /api/v1/orders
+POST   /api/v1/orders/{id}/confirm
+POST   /api/v1/orders/{id}/cancel
 ```
 
 Chưa implement trong source hiện tại.
@@ -67,18 +119,20 @@ Chưa implement trong source hiện tại.
 Không cho phép Controller tự ý đổi `status`.
 
 ```text
-OrderApplicationService
+OrderCommandService / OrderConfirmService / OrderCancelService
  -> kiểm tra current state
  -> kiểm tra transition hợp lệ
- -> gọi Inventory Service nếu cần
+ -> gọi Inventory Service (qua Client Port) nếu cần
  -> cập nhật order/order_items
- -> phát event nếu cần
+ -> lưu outbox event
 ```
+
+State machine: `PENDING → CONFIRMED → (COMPLETED|CANCELLED)`, `PENDING → CANCELLED`, `CONFIRMED → CANCELLED` (with compensation).
 
 ## 6. Demo tạo đơn
 
 ```http
-POST http://localhost:8080/api/orders
+POST http://localhost:8080/api/v1/orders
 Authorization: Bearer <JWT>
 Content-Type: application/json
 
@@ -95,39 +149,131 @@ Luồng mục tiêu:
 ```text
 Client
  -> Gateway
- -> OrderController
- -> OrderApplicationService
- -> transaction ngắn: lưu order trạng thái PENDING
- -> commit order_db
- -> InventoryClient.reserve() với idempotency key
+ -> OrderCreateController
+ -> OrderCommandService (Port)
+ -> OrderCommandServiceImpl (Adapter)
+ -> OrderRepository (Port) + OrderItemRepository (Port)
+ -> order_db (PENDING)
+ -> ProductClient.getPrices() (sync, ngoài transaction)
+ -> InventoryClient.reserve() (async, idempotency key)
  -> Inventory Service
- -> transaction ngắn: reserve thành công thì cập nhật CONFIRMED
+ -> OrderConfirmService.confirm() -> CONFIRMED + outbox event
  -> response
 ```
 
 Không giữ transaction DB mở khi gọi Inventory Service. Nếu reserve thất bại, chuyển order về trạng thái phù hợp; nếu timeout không rõ kết quả, retry/query bằng cùng idempotency key. Order Service không tự truy cập inventory_db để sửa dữ liệu.
 
-## 7. Cách code create/confirm order
+## 7. Quy tắc kiến trúc
 
-`order-service` sở hữu `orders` và `order_items`; không thêm JPA relationship sang Product/Inventory DB. Các ID của product/user/kho là logical reference. Migration hiện chưa có `warehouse_id` trong `orders`; cần migration trước khi lọc/phân quyền order theo kho.
+- **Controller** chỉ map HTTP → DTO → Service Port
+- **Service Interface (Port)**: `OrderCommandService`, `OrderConfirmService`, `OrderCancelService`, `OrderQueryService`
+- **Service Impl (Adapter)**: inject Repository Port + Client Port, `@Transactional`
+- **Repository Interface (Port)**: `OrderRepository`, `OrderItemRepository` (extend JpaRepository)
+- **Client Interface (Port)**: `InventoryClient`, `ProductClient` (WebClient)
+- **db/jpa/**: JPA Entity (Hibernate Adapter)
+- **db/mybatis/**: MyBatis XML cho query phức tạp (list view)
+- **event/**: Outbox pattern cho domain event
+- **Migration**: `resources/db/migration/`
 
-### Request DTO và repository
+## 8. Chi tiết triển khai màn hình S09-order-create/confirm/cancel
+
+### 8.1 Request DTO (trong `screens/S09-order-create/dto/`)
 
 ```java
 public record CreateOrderRequest(
-  @NotBlank String type,
-  @NotEmpty List<@Valid OrderItemRequest> items
+    @NotBlank @Pattern(regexp = "^(INBOUND|OUTBOUND)$") String type,
+    @NotNull Long warehouseId,
+    @NotEmpty List<@Valid OrderItemRequest> items
 ) {}
 
 public record OrderItemRequest(
-  @NotNull Long productId,
-  @Positive Integer quantity
+    @NotNull Long productId,
+    @Positive Integer quantity
+) {}
+
+public record ConfirmOrderRequest(
+    @NotNull String idempotencyKey
+) {}
+
+public record CancelOrderRequest(
+    @NotBlank String reason
 ) {}
 ```
+
+### 8.2 Entity (trong `screens/S09-order-create/db/jpa/`)
+
+```java
+@Entity @Table(name = "orders")
+@EntityListeners(AuditingEntityListener.class)
+@Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder
+public class OrderEntity {
+    @Id @GeneratedValue private UUID id;
+    
+    @Column(name = "order_no", nullable = false, unique = true, length = 50)
+    private String orderNo;
+    
+    @Enumerated(EnumType.STRING) @Column(nullable = false, length = 20)
+    private OrderType type; // INBOUND, OUTBOUND
+    
+    @Enumerated(EnumType.STRING) @Column(nullable = false, length = 20)
+    private OrderStatus status; // PENDING, CONFIRMED, CANCELLED, FAILED, COMPLETED
+    
+    @Column(name = "user_id", nullable = false)
+    private UUID userId;
+    
+    @Column(name = "warehouse_id")
+    private Long warehouseId;
+    
+    @Column(precision = 18, scale = 2)
+    private BigDecimal totalAmount;
+    
+    @Version private Long version;
+    
+    @CreatedDate private Instant createdAt;
+    @LastModifiedDate private Instant updatedAt;
+    
+    @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<OrderItemEntity> items = new ArrayList<>();
+    
+    // Domain methods
+    public void confirm() { this.status = OrderStatus.CONFIRMED; }
+    public void cancel(String reason) { this.status = OrderStatus.CANCELLED; this.cancelReason = reason; }
+    public void markFailed(String error) { this.status = OrderStatus.FAILED; this.errorMessage = error; }
+    public boolean canConfirm() { return this.status == OrderStatus.PENDING; }
+    public boolean canCancel() { return this.status == OrderStatus.PENDING || this.status == OrderStatus.CONFIRMED; }
+}
+
+@Entity @Table(name = "order_items")
+@EntityListeners(AuditingEntityListener.class)
+@Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder
+public class OrderItemEntity {
+    @Id @GeneratedValue private Long id;
+    
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "order_id", nullable = false)
+    private OrderEntity order;
+    
+    @Column(name = "product_id", nullable = false)
+    private Long productId;
+    
+    @Column(nullable = false)
+    private Integer quantity;
+    
+    @Column(name = "unit_price", precision = 18, scale = 2)
+    private BigDecimal unitPrice;
+    
+    @CreatedDate @Column(name = "created_at")
+    private Instant createdAt;
+}
+```
+
+### 8.3 Repository Port (trong `screens/S09-order-create/repository/`)
 
 ```java
 public interface OrderRepository extends JpaRepository<OrderEntity, UUID> {
     Optional<OrderEntity> findByOrderNo(String orderNo);
+    Page<OrderEntity> findByUserId(UUID userId, Pageable pageable);
+    Page<OrderEntity> findByStatus(OrderStatus status, Pageable pageable);
 }
 
 public interface OrderItemRepository extends JpaRepository<OrderItemEntity, Long> {
@@ -135,59 +281,238 @@ public interface OrderItemRepository extends JpaRepository<OrderItemEntity, Long
 }
 ```
 
-### Tạo đơn trong một local transaction
-
-Gọi Product Service lấy giá trước khi mở transaction ghi order. Tách orchestration và persistence thành hai bean để Spring proxy áp dụng `@Transactional` cho đúng:
+### 8.4 Service Port & Impl (trong `screens/S09-order-create/service/`)
 
 ```java
-public OrderResponse create(CreateOrderRequest request, UUID userId) {
-    validateOrderType(request.type());
-    List<PricedOrderItem> pricedItems = productClient.getCurrentPrices(request.items());
-  return orderWriter.savePending(request, userId, pricedItems);
+// Port - Command
+public interface OrderCommandService {
+    OrderResponse create(CreateOrderRequest request, UUID userId);
+}
+
+// Port - Confirm (separate use case)
+public interface OrderConfirmService {
+    OrderResponse confirm(UUID orderId, String idempotencyKey);
+}
+
+// Port - Cancel
+public interface OrderCancelService {
+    OrderResponse cancel(UUID orderId, CancelOrderRequest request);
+}
+
+// Port - Query
+public interface OrderQueryService {
+    OrderResponse findById(UUID id);
+    OrderListResponse findAll(UUID userId, OrderStatus status, Pageable pageable);
+}
+
+// Impl - Create
+@Service @RequiredArgsConstructor
+public class OrderCommandServiceImpl implements OrderCommandService {
+    private final OrderRepository orderRepo;
+    private final OrderItemRepository itemRepo;
+    private final ProductClient productClient;
+    
+    @Transactional
+    public OrderResponse create(CreateOrderRequest req, UUID userId) {
+        // 1. Validate items, get prices from Product Service (sync, outside tx)
+        List<PricedOrderItem> pricedItems = productClient.getCurrentPrices(req.items());
+        
+        // 2. Create order PENDING
+        BigDecimal total = pricedItems.stream()
+            .map(i -> i.unitPrice().multiply(BigDecimal.valueOf(i.quantity())))
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        
+        OrderEntity order = OrderEntity.builder()
+            .orderNo(generateOrderNo())
+            .type(req.type())
+            .userId(userId)
+            .warehouseId(req.warehouseId())
+            .status(OrderStatus.PENDING)
+            .totalAmount(total)
+            .build();
+        
+        order.addItems(pricedItems.stream().map(this::toItemEntity).toList());
+        orderRepo.save(order);
+        
+        return OrderResponse.from(order);
+    }
+}
+
+// Impl - Confirm (Saga Orchestration)
+@Service @RequiredArgsConstructor
+public class OrderConfirmServiceImpl implements OrderConfirmService {
+    private final OrderRepository orderRepo;
+    private final InventoryClient inventoryClient;
+    private final OutboxEventRepository outboxRepo;
+    private final IdempotencyService idempotency;
+    
+    @Transactional
+    public OrderResponse confirm(UUID orderId, String idempotencyKey) {
+        // Check idempotency
+        if (idempotency.alreadyProcessed(idempotencyKey)) {
+            return idempotency.getResult(idempotencyKey);
+        }
+        
+        OrderEntity order = orderRepo.findById(orderId)
+            .orElseThrow(() -> new EntityNotFoundException("Order not found"));
+        
+        if (!order.canConfirm()) {
+            throw new BusinessRuleException("Order cannot be confirmed from status: " + order.getStatus());
+        }
+        
+        if (order.getType() == OrderType.OUTBOUND) {
+            // 3. Call Inventory Service reserve
+            ReserveRequest reserveReq = buildReserveRequest(order, idempotencyKey);
+            ReserveResponse reserveResp = inventoryClient.reserve(reserveReq);
+            
+            if (!reserveResp.success()) {
+                order.markFailed(reserveResp.error());
+                OrderResponse fail = OrderResponse.from(order);
+                idempotency.saveResult(idempotencyKey, fail);
+                return fail;
+            }
+        }
+        
+        // 4. Confirm order
+        order.confirm();
+        
+        // 5. Publish outbox event
+        outboxRepo.save(new OutboxEvent("order.confirmed", orderId, ...));
+        
+        OrderResponse success = OrderResponse.from(order);
+        idempotency.saveResult(idempotencyKey, success);
+        return success;
+    }
+}
+
+// Impl - Cancel
+@Service @RequiredArgsConstructor
+public class OrderCancelServiceImpl implements OrderCancelService {
+    private final OrderRepository orderRepo;
+    private final InventoryClient inventoryClient;
+    private final OutboxEventRepository outboxRepo;
+    
+    @Transactional
+    public OrderResponse cancel(UUID orderId, CancelOrderRequest req) {
+        OrderEntity order = orderRepo.findById(orderId)
+            .orElseThrow(() -> new EntityNotFoundException("Order not found"));
+        
+        if (!order.canCancel()) {
+            throw new BusinessRuleException("Order cannot be cancelled from status: " + order.getStatus());
+        }
+        
+        // Compensation: if CONFIRMED, release inventory
+        if (order.getStatus() == OrderStatus.CONFIRMED && order.getType() == OrderType.OUTBOUND) {
+            ReleaseRequest releaseReq = buildReleaseRequest(order);
+            inventoryClient.release(releaseReq);
+        }
+        
+        order.cancel(req.reason());
+        outboxRepo.save(new OutboxEvent("order.cancelled", orderId, ...));
+        return OrderResponse.from(order);
+    }
 }
 ```
 
-```java
-@Service
-public class OrderWriter {
-  @Transactional
-  public OrderResponse savePending(CreateOrderRequest request,
-                   UUID userId,
-                   List<PricedOrderItem> pricedItems) {
-    BigDecimal total = pricedItems.stream()
-      .map(item -> item.unitPrice().multiply(BigDecimal.valueOf(item.quantity())))
-      .reduce(BigDecimal.ZERO, BigDecimal::add);
+### 8.5 Client Port (trong `client/`)
 
-    OrderEntity order = orders.save(OrderEntity.pending(
-      UUID.randomUUID(), generateOrderNo(), userId, request.type(), total));
-    items.saveAll(pricedItems.stream()
-      .map(item -> OrderItemEntity.from(order, item))
-      .toList());
-    return OrderResponse.from(order, pricedItems);
-      }
+```java
+// Port interface
+public interface InventoryClient {
+    ReserveResponse reserve(ReserveRequest request);
+    ReleaseResponse release(ReleaseRequest request);
+}
+
+// WebClient Adapter impl
+@Component @RequiredArgsConstructor
+public class WebClientInventoryClient implements InventoryClient {
+    private final WebClient webClient;
+    
+    public ReserveResponse reserve(ReserveRequest req) {
+        return webClient.post()
+            .uri("/api/v1/inventory/reserve")
+            .header("Idempotency-Key", req.idempotencyKey())
+            .bodyValue(req)
+            .retrieve()
+            .onStatus(HttpStatus::is4xxClientError, 
+                r -> r.bodyToMono(String.class).map(InventoryServiceException::new))
+            .onStatus(HttpStatus::is5xxServerError,
+                r -> r.bodyToMono(String.class).map(InventoryServiceException::new))
+            .bodyToMono(ReserveResponse.class)
+            .block(); // or reactive
+    }
 }
 ```
 
-    Giá phải lấy từ Product Service, không tin giá/tổng tiền do client gửi. Network call chạy ngoài transaction Order DB; header và tất cả order item vẫn được ghi cùng một transaction. Cần quyết định rõ khi Product Service không truy cập được thì tạo đơn fail hay dùng snapshot giá đã được xác nhận.
+### 8.6 Controller (trong `screens/S09-order-create/controller/`, `S09-order-confirm/controller/`, `S09-order-cancel/controller/`)
 
-### Confirm qua Inventory Service
+```java
+@RestController
+@RequestMapping("/api/v1/orders")
+@RequiredArgsConstructor
+public class OrderCreateController {
+    private final OrderCommandService orderCommandService;
+    
+    @PostMapping
+    public ResponseEntity<OrderResponse> create(
+            @Valid @RequestBody CreateOrderRequest request,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        OrderResponse response = orderCommandService.create(request, principal.userId());
+        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
+}
 
-Không giữ transaction PostgreSQL mở trong lúc gọi HTTP sang Inventory. Dùng orchestration/saga:
+@RestController
+@RequestMapping("/api/v1/orders")
+@RequiredArgsConstructor
+public class OrderConfirmController {
+    private final OrderConfirmService confirmService;
+    
+    @PostMapping("/{id}/confirm")
+    public ResponseEntity<OrderResponse> confirm(
+            @PathVariable UUID id,
+            @Valid @RequestBody ConfirmOrderRequest request) {
+        return ResponseEntity.ok(confirmService.confirm(id, request.idempotencyKey()));
+    }
+}
 
-```text
-1. Transaction ngắn: PENDING -> CONFIRMING, lưu idempotency/request key
-2. Gọi InventoryClient.reserve(orderId, lines, idempotencyKey)
-3. Inventory trả thành công: transaction ngắn -> CONFIRMED + lưu outbox event
-4. Inventory lỗi: transaction ngắn -> PENDING/FAILED theo policy
-5. Nếu timeout không rõ kết quả: truy vấn/retry bằng cùng idempotency key
+@RestController
+@RequestMapping("/api/v1/orders")
+@RequiredArgsConstructor
+public class OrderCancelController {
+    private final OrderCancelService cancelService;
+    
+    @PostMapping("/{id}/cancel")
+    public ResponseEntity<OrderResponse> cancel(
+            @PathVariable UUID id,
+            @Valid @RequestBody CancelOrderRequest request) {
+        return ResponseEntity.ok(cancelService.cancel(id, request));
+    }
+}
+
+@RestController
+@RequestMapping("/api/v1/orders")
+@RequiredArgsConstructor
+public class OrderListController {
+    private final OrderQueryService queryService;
+    
+    @GetMapping
+    public ResponseEntity<OrderListResponse> findAll(
+            @RequestParam(required = false) OrderStatus status,
+            @RequestParam(defaultValue = "0") @Min(0) int page,
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        return ResponseEntity.ok(queryService.findAll(principal.userId(), status, PageRequest.of(page, size)));
+    }
+}
 ```
 
-`OrderApplicationService` điều phối state; `InventoryClient` chỉ gọi `/api/inventory/...`; không được inject `InventoryRepository` hoặc mở connection tới inventory_db.
-
-### Test cần có
+### 8.7 Test cần có
 
 - Tạo order lưu header và các line trong cùng local transaction.
-- Giá/tổng tiền lấy từ catalog response và tính bằng `BigDecimal`.
-- Confirm đúng state gọi reserve đúng một lần theo idempotency key.
+- Giá/tổng tiền lấy từ Product Service response và tính bằng `BigDecimal`.
+- Confirm OUTBOUND đúng state gọi Inventory reserve đúng một lần theo idempotency key.
 - Inventory timeout không làm order chuyển `CONFIRMED` sai.
-- Cancel/confirm sai state trả 409; lỗi validation trả 400.
+- Cancel CONFIRMED → gọi Inventory release (compensation).
+- Outbox event published after commit.
+- Không inject `InventoryRepository` hoặc mở connection tới inventory_db.
